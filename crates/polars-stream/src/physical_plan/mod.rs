@@ -17,6 +17,7 @@ use polars_plan::plans::{AExpr, DataFrameUdf, IR};
 use polars_plan::prelude::expr_ir::ExprIR;
 
 mod fmt;
+mod io;
 mod lower_expr;
 mod lower_group_by;
 mod lower_ir;
@@ -31,6 +32,7 @@ use polars_utils::slice_enum::Slice;
 use slotmap::{SecondaryMap, SlotMap};
 pub use to_graph::physical_plan_to_graph;
 
+pub use self::lower_ir::StreamingLowerIRContext;
 use crate::nodes::io_sources::multi_file_reader::reader_interface::builder::FileReaderBuilder;
 use crate::physical_plan::lower_expr::ExprCache;
 
@@ -164,6 +166,9 @@ pub enum PhysNodeKind {
     InMemoryMap {
         input: PhysStream,
         map: Arc<dyn DataFrameUdf>,
+
+        /// A formatted explain of what the in-memory map. This usually calls format on the IR.
+        format_str: Option<String>,
     },
 
     Map {
@@ -249,6 +254,12 @@ pub enum PhysNodeKind {
         output_bool: bool,
     },
 
+    CrossJoin {
+        input_left: PhysStream,
+        input_right: PhysStream,
+        args: JoinArgs,
+    },
+
     /// Generic fallback for (as-of-yet) unsupported streaming joins.
     /// Fully sinks all data to in-memory data frames and uses the in-memory
     /// engine to perform the join.
@@ -326,6 +337,11 @@ fn visit_node_inputs_mut(
                 input_left,
                 input_right,
                 ..
+            }
+            | PhysNodeKind::CrossJoin {
+                input_left,
+                input_right,
+                ..
             } => {
                 rec!(input_left.node);
                 rec!(input_right.node);
@@ -394,6 +410,7 @@ pub fn build_physical_plan(
     ir_arena: &mut Arena<IR>,
     expr_arena: &mut Arena<AExpr>,
     phys_sm: &mut SlotMap<PhysNodeKey, PhysNode>,
+    ctx: StreamingLowerIRContext,
 ) -> PolarsResult<PhysNodeKey> {
     let mut schema_cache = PlHashMap::with_capacity(ir_arena.len());
     let mut expr_cache = ExprCache::with_capacity(expr_arena.len());
@@ -406,6 +423,7 @@ pub fn build_physical_plan(
         &mut schema_cache,
         &mut expr_cache,
         &mut cache_nodes,
+        ctx,
     )?;
     insert_multiplexers(vec![phys_root.node], phys_sm);
     Ok(phys_root.node)

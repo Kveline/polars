@@ -8,6 +8,7 @@ use polars_lazy::dsl::Expr;
 #[cfg(feature = "list_eval")]
 use polars_lazy::dsl::ListNameSpaceExtension;
 use polars_ops::chunked_array::UnicodeForm;
+use polars_ops::series::RoundMode;
 use polars_plan::dsl::{coalesce, concat_str, len, max_horizontal, min_horizontal, when};
 use polars_plan::plans::{DynLiteralValue, LiteralValue, typed_lit};
 use polars_plan::prelude::{StrptimeOptions, col, cols, lit};
@@ -989,7 +990,7 @@ impl SQLFunctionVisitor<'_> {
             Round => {
                 let args = extract_args(function)?;
                 match args.len() {
-                    1 => self.visit_unary(|e| e.round(0)),
+                    1 => self.visit_unary(|e| e.round(0, RoundMode::default())),
                     2 => self.try_visit_binary(|e, decimals| {
                         Ok(e.round(match decimals {
                             Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(n))) => {
@@ -998,7 +999,7 @@ impl SQLFunctionVisitor<'_> {
                                 }
                             },
                             _ => polars_bail!(SQLSyntax: "invalid value for ROUND decimals ({})", args[1]),
-                        }))
+                        }, RoundMode::default()))
                     }),
                     _ => polars_bail!(SQLSyntax: "ROUND expects 1-2 arguments (found {})", args.len()),
                 }
@@ -1797,23 +1798,22 @@ impl SQLFunctionVisitor<'_> {
 
     fn visit_count(&mut self) -> PolarsResult<Expr> {
         let (args, is_distinct) = extract_args_distinct(self.func)?;
-        match (is_distinct, args.as_slice()) {
+        let count_expr = match (is_distinct, args.as_slice()) {
             // count(*), count()
-            (false, [FunctionArgExpr::Wildcard] | []) => Ok(len()),
+            (false, [FunctionArgExpr::Wildcard] | []) => len(),
             // count(column_name)
             (false, [FunctionArgExpr::Expr(sql_expr)]) => {
                 let expr = parse_sql_expr(sql_expr, self.ctx, self.active_schema)?;
-                let expr = self.apply_window_spec(expr, &self.func.over)?;
-                Ok(expr.count())
+                expr.count()
             },
             // count(distinct column_name)
             (true, [FunctionArgExpr::Expr(sql_expr)]) => {
                 let expr = parse_sql_expr(sql_expr, self.ctx, self.active_schema)?;
-                let expr = self.apply_window_spec(expr, &self.func.over)?;
-                Ok(expr.clone().n_unique().sub(expr.null_count().gt(lit(0))))
+                expr.clone().n_unique().sub(expr.null_count().gt(lit(0)))
             },
-            _ => self.not_supported_error(),
-        }
+            _ => self.not_supported_error()?,
+        };
+        self.apply_window_spec(count_expr, &self.func.over)
     }
 
     fn apply_order_by(&mut self, expr: Expr, order_by: &[OrderByExpr]) -> PolarsResult<Expr> {

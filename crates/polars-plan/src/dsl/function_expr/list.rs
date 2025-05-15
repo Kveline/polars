@@ -133,19 +133,15 @@ impl ListFunction {
             #[cfg(feature = "list_sample")]
             L::Sample { .. } => FunctionOptions::elementwise(),
             #[cfg(feature = "list_gather")]
-            L::Gather(_) => FunctionOptions::groupwise(),
+            L::Gather(_) => FunctionOptions::elementwise(),
             #[cfg(feature = "list_gather")]
             L::GatherEvery => FunctionOptions::elementwise(),
             #[cfg(feature = "list_sets")]
-            L::SetOperation(_) => FunctionOptions {
-                collect_groups: ApplyOptions::ElementWise,
-                cast_options: Some(CastingRules::Supertype(SuperTypeOptions {
+            L::SetOperation(_) => FunctionOptions::elementwise()
+                .with_casting_rules(CastingRules::Supertype(SuperTypeOptions {
                     flags: SuperTypeFlags::default() | SuperTypeFlags::ALLOW_IMPLODE_LIST,
-                })),
-
-                flags: FunctionFlags::default() & !FunctionFlags::RETURNS_SCALAR,
-                ..Default::default()
-            },
+                }))
+                .with_flags(|f| f & !FunctionFlags::RETURNS_SCALAR),
             #[cfg(feature = "diff")]
             L::Diff { .. } => FunctionOptions::elementwise(),
             #[cfg(feature = "list_drop_nulls")]

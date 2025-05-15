@@ -45,6 +45,9 @@ fn scan_type_to_pyobject(
                 .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
             Ok(("ndjson", options).into_py_any(py)?)
         },
+        FileScan::PythonDataset { .. } => {
+            Err(PyNotImplementedError::new_err("python dataset scan"))
+        },
         FileScan::Anonymous { .. } => Err(PyNotImplementedError::new_err("anonymous scan")),
     }
 }
@@ -368,6 +371,7 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             output_schema: _,
             scan_type,
             unified_scan_args,
+            id: _,
         } => Scan {
             paths: sources
                 .into_paths()

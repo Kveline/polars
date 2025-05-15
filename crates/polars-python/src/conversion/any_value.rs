@@ -11,7 +11,7 @@ use polars::chunked_array::object::PolarsObjectSafe;
 #[cfg(feature = "object")]
 use polars::datatypes::OwnedObject;
 use polars::datatypes::{DataType, Field, TimeUnit};
-use polars::prelude::{AnyValue, PlSmallStr, Series};
+use polars::prelude::{AnyValue, PlSmallStr, Series, TimeZone};
 use polars_core::utils::any_values_to_supertype_and_n_dtypes;
 use polars_core::utils::arrow::temporal_conversions::date32_to_date;
 use polars_utils::aliases::PlFixedStateQuality;
@@ -19,9 +19,10 @@ use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{
-    PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PySequence, PyString, PyTuple, PyType,
+    PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PySequence, PyString, PyTuple,
+    PyType,
 };
-use pyo3::{IntoPyObjectExt, intern};
+use pyo3::{IntoPyObjectExt, PyTypeCheck, intern};
 
 use super::datetime::{
     datetime_to_py_object, elapsed_offset_to_timedelta, nanos_since_midnight_to_naivetime,
@@ -247,7 +248,7 @@ pub(crate) fn py_object_to_any_value<'py>(
     }
 
     fn get_date(ob: &Bound<'_, PyAny>, _strict: bool) -> PyResult<AnyValue<'static>> {
-        const UNIX_EPOCH: NaiveDate = NaiveDateTime::UNIX_EPOCH.date();
+        const UNIX_EPOCH: NaiveDate = DateTime::UNIX_EPOCH.naive_utc().date();
         let date = ob.extract::<NaiveDate>()?;
         let elapsed = date.signed_duration_since(UNIX_EPOCH);
         Ok(AnyValue::Date(elapsed.num_days() as i32))
@@ -259,7 +260,7 @@ pub(crate) fn py_object_to_any_value<'py>(
 
         if tzinfo.is_none() {
             let datetime = ob.extract::<NaiveDateTime>()?;
-            let delta = datetime - NaiveDateTime::UNIX_EPOCH;
+            let delta = datetime - DateTime::UNIX_EPOCH.naive_utc();
             let timestamp = delta.num_microseconds().unwrap();
             return Ok(AnyValue::Datetime(timestamp, TimeUnit::Microseconds, None));
         }
@@ -281,7 +282,7 @@ pub(crate) fn py_object_to_any_value<'py>(
 
         let (timestamp, tz) = if tzinfo.hasattr(intern!(py, "key"))? {
             let datetime = ob.extract::<DateTime<Tz>>()?;
-            let tz = datetime.timezone().name().into();
+            let tz = unsafe { TimeZone::from_static(datetime.timezone().name()) };
             if datetime.year() >= 2100 {
                 // chrono-tz does not support dates after 2100
                 // https://github.com/chronotope/chrono-tz/issues/135
@@ -300,7 +301,7 @@ pub(crate) fn py_object_to_any_value<'py>(
         } else {
             let datetime = ob.extract::<DateTime<FixedOffset>>()?;
             let delta = datetime.to_utc() - DateTime::UNIX_EPOCH;
-            (delta.num_microseconds().unwrap(), "UTC".into())
+            (delta.num_microseconds().unwrap(), TimeZone::UTC)
         };
 
         Ok(AnyValue::DatetimeOwned(
@@ -444,6 +445,25 @@ pub(crate) fn py_object_to_any_value<'py>(
         Ok(AnyValue::List(s))
     }
 
+    fn get_mapping<'py>(ob: &Bound<'py, PyAny>, strict: bool) -> PyResult<AnyValue<'py>> {
+        let mapping = ob.downcast::<PyMapping>()?;
+        let len = mapping.len()?;
+        let mut keys = Vec::with_capacity(len);
+        let mut vals = Vec::with_capacity(len);
+
+        for item in mapping.items()?.try_iter()? {
+            let item = item?.downcast_into::<PyTuple>()?;
+            let (key_py, val_py) = (item.get_item(0)?, item.get_item(1)?);
+
+            let key: Cow<str> = key_py.extract()?;
+            let val = py_object_to_any_value(&val_py, strict, true)?;
+
+            keys.push(Field::new(key.as_ref().into(), val.dtype()));
+            vals.push(val);
+        }
+        Ok(AnyValue::StructOwned(Box::new((vals, keys))))
+    }
+
     fn get_struct<'py>(ob: &Bound<'py, PyAny>, strict: bool) -> PyResult<AnyValue<'py>> {
         let dict = ob.downcast::<PyDict>().unwrap();
         let len = dict.len();
@@ -496,6 +516,8 @@ pub(crate) fn py_object_to_any_value<'py>(
             Ok(get_list)
         } else if ob.is_instance_of::<PyDict>() {
             Ok(get_struct)
+        } else if PyMapping::type_check(ob) {
+            Ok(get_mapping)
         } else {
             let ob_type = ob.get_type();
             let type_name = ob_type.fully_qualified_name()?.to_string();
